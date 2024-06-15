@@ -1,0 +1,38 @@
+0. Prologue
+1. Initialization
+
+
+
+0. Prologue
+
+	These are the notes that I took while studing the Memory Management subsystem of Linux. When it comes to arch-specific details I only
+	consider x86-64(sometimes I do mention certain 32-bit specific details). when I study a certain part of Linux, I will always choose
+	the latest stable version. I will state the version of Linux when I'm taking these notes.
+
+1.1. Initialization
+	
+	/* fuctions to study(in call order):
+	 *
+	 * start_kernel -+--> setup_arch
+	 * 		 |
+	 *		 +--> mm_core_init
+         *
+	 * setup_arch -+-> e820__memblock_setup
+	 *	       |
+	 *	       +-> initmem_init
+	 *	       |
+	 *   	       +-> x86_init.paging.pagetable_init -> native_pagetable_init -> paging_init -+-> sparse_init
+	 *  			   							           |
+	 * 											   +-> zone_sizes_init -> free_area_init
+	 * 
+	 * mm_core_init -+-> mem_init 
+	 */
+
+
+1.2. Memblock:
+	memblock is used to manage and allocate memory at early boot before page allocator is ready. All memblock memory is freed by mem_init inside mm_core_init. 
+
+
+1.2.1 e820__memblock_setup:
+	
+	this is the function that initializes memblock data structures using the bootloader-supplied e820 map.
