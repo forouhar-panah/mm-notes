@@ -10,8 +10,8 @@
 	the latest stable version. I will state the version of Linux when I'm taking these notes.
 
 1.1. Initialization
-	
-	/* fuctions to study(in call order):
+
+	/* fuctions to study(in call order, Linux 6.9):
 	 *
 	 * start_kernel -+--> setup_arch
 	 * 		 |
@@ -24,15 +24,107 @@
 	 *   	       +-> x86_init.paging.pagetable_init -> native_pagetable_init -> paging_init -+-> sparse_init
 	 *  			   							           |
 	 * 											   +-> zone_sizes_init -> free_area_init
-	 * 
-	 * mm_core_init -+-> mem_init 
+	 *
+	 * mm_core_init -+-> mem_init
 	 */
 
 
 1.2. Memblock:
-	memblock is used to manage and allocate memory at early boot before page allocator is ready. All memblock memory is freed by mem_init inside mm_core_init. 
+	memblock is used to manage and allocate memory at early boot before page allocator is ready. All memblock memory is freed by mem_init inside mm_core_init.
 
+1.2.1 Important memblock data structures:
 
-1.2.1 e820__memblock_setup:
-	
+	/*	struct memblock {				// memblock allocator metadata
+	 *		bool bottom_up;                         // @bottom_up: is bottom up direction?
+	 *		phys_addr_t current_limit;              // @current_limit: physical address of the current allocation limit
+	 *		struct memblock_type memory;            // @memory: usable memory regions
+	 *		struct memblock_type reserved;          // @reserved: reserved memory regions
+	 *	};
+	 */
+
+	/*	struct memblock_type {				// collection of memory regions of certain type
+	 *		unsigned long cnt;			// @cnt: number of regions
+	 *		unsigned long max;			// @max: size of the allocated array
+	 *		phys_addr_t total_size;			// @total_size: size of all regions
+	 *		struct memblock_region *regions;	// @regions: array of regions
+	 *		char *name;				// @name: the memory type symbolic name
+	 *	};
+	 */
+
+	/*	struct memblock_region {			// represents a memory region
+	 *		phys_addr_t base;			// @base: base address of the region
+	 *		phys_addr_t size;			// @size: size of the region
+	 *		enum memblock_flags flags;		// @flags: memory region attributes
+	 *	#ifdef CONFIG_NUMA
+	 *		int nid;				// @nid: NUMA node id
+	 *	#endif
+	 *	};
+	 */
+
+	/*	enum memblock_flags {
+	 *		MEMBLOCK_NONE		= 0x0,		// No special request
+	 *		MEMBLOCK_HOTPLUG	= 0x1,		// hotpluggable region
+	 *		MEMBLOCK_MIRROR		= 0x2,		// mirrored region
+	 *		MEMBLOCK_NOMAP		= 0x4,		// don't add to kernel direct mapping
+	 *		MEMBLOCK_DRIVER_MANAGED = 0x8,		// always detected via a driver
+	 *		MEMBLOCK_RSRV_NOINIT	= 0x10,		// don't initialize struct pages
+	 *	};
+	 */
+
+1.2.1.1 Global memblock data structure in mm/memblock.c :
+
+	/*	struct memblock memblock __initdata_memblock = {
+	 *		.memory.regions		= memblock_memory_init_regions,
+	 *		.memory.max		= INIT_MEMBLOCK_MEMORY_REGIONS,		// amounts to 128 on x86
+	 *		.memory.name		= "memory",
+	 *
+	 *		.reserved.regions	= memblock_reserved_init_regions,
+	 *		.reserved.max		= INIT_MEMBLOCK_RESERVED_REGIONS,	// amounts to 128 on x86
+	 *		.reserved.name		= "reserved",
+	 *
+	 *		.bottom_up		= false,
+	 *		.current_limit		= MEMBLOCK_ALLOC_ANYWHERE,
+	 */	};
+
+1.2.2 e820__memblock_setup:
+
 	this is the function that initializes memblock data structures using the bootloader-supplied e820 map.
+	It iterates over the e820 table and adds the ranges of memory to memblock data structures using memblock_add or memblock_reserve.
+	both memblock_add and memblock_reserve, internally call memblock_add_range to add their memory to memblock.
+	memblock_add adds memory to memblock.memory while memblock_reserve adds to memblock.reserved.
+	Both memblock.memory and memblock.reserved can have up to 128 entries in the regions array, but that is sometimes not enough, for example,
+	the e820 map might supply more than 128 regions, thus we allow for resizing by calling memblock_allow_resize in the beginning.
+
+1.2.3 memblock_add and memblock_reserve:
+
+	/*	int __init_memblock memblock_add(phys_addr_t base, phys_addr_t size)
+	 *	{
+	 *		phys_addr_t end = base + size - 1;
+	 *
+	 *		memblock_dbg("%s: [%pa-%pa] %pS\n", __func__,
+	 *			     &base, &end, (void *)_RET_IP_);
+	 *
+	 *		return memblock_add_range(&memblock.memory, base, size, MAX_NUMNODES, 0);
+	 */	}
+
+	 Basically this fuction just calls memblock_add_range and pass its own args to it. memblock_reserve is the same
+	 except that it chooses &memblock.reserved instead.
+
+
+1.2. memblock_add_range:
+
+	memblock_add_range - add new memblock region
+	@type: memblock type to add new region into
+	@base: base address of the new region
+	@size: size of the new region
+	@nid: nid of the new region
+	@flags: flags of the new region
+
+	Add new memblock region [@base, @base + @size) into @type.  The new region
+	is allowed to overlap with existing ones - overlaps don't affect already
+	existing regions.  @type is guaranteed to be minimal (all neighbouring
+	compatible regions are merged) after the addition.
+
+	Return:
+	0 on success, -errno on failure.
+
