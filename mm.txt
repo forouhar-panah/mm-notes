@@ -3,11 +3,17 @@
 
 
 
-0. Prologue
+0.1. Prologue
 
 	These are the notes that I took while studing the Memory Management subsystem of Linux. When it comes to arch-specific details I only
 	consider x86-64(sometimes I do mention certain 32-bit specific details). when I study a certain part of Linux, I will always choose
 	the latest stable version. I will state the version of Linux when I'm taking these notes.
+
+0.2. Note style
+
+	Aside from my notes, I incorporate both codes and comments from source code. Code blocks and function graphs are enclosed inside c-style
+	multi-line comments(within /* ... */) while comments and documentations from source code are preceded by hyphens(-).
+	I decided to use hyphens to distinguish my own notes from linux's comments.
 
 1.1. Initialization
 
@@ -84,7 +90,8 @@
 	 *
 	 *		.bottom_up		= false,
 	 *		.current_limit		= MEMBLOCK_ALLOC_ANYWHERE,
-	 */	};
+	 *	};
+	 */
 
 1.2.2 e820__memblock_setup:
 
@@ -105,26 +112,273 @@
 	 *			     &base, &end, (void *)_RET_IP_);
 	 *
 	 *		return memblock_add_range(&memblock.memory, base, size, MAX_NUMNODES, 0);
-	 */	}
+	 *	}
+	 */
 
 	 Basically this fuction just calls memblock_add_range and pass its own args to it. memblock_reserve is the same
 	 except that it chooses &memblock.reserved instead.
 
 
-1.2. memblock_add_range:
+1.2.4 memblock_add_range:
 
-	memblock_add_range - add new memblock region
-	@type: memblock type to add new region into
-	@base: base address of the new region
-	@size: size of the new region
-	@nid: nid of the new region
-	@flags: flags of the new region
+	-memblock_add_range - add new memblock region
+	-@type: memblock type to add new region into
+	-@base: base address of the new region
+	-@size: size of the new region
+	-@nid: nid of the new region
+	-@flags: flags of the new region
 
-	Add new memblock region [@base, @base + @size) into @type.  The new region
-	is allowed to overlap with existing ones - overlaps don't affect already
-	existing regions.  @type is guaranteed to be minimal (all neighbouring
-	compatible regions are merged) after the addition.
+	-Add new memblock region [@base, @base + @size) into @type.  The new region
+	-is allowed to overlap with existing ones - overlaps don't affect already
+	-existing regions.  @type is guaranteed to be minimal (all neighbouring
+	-compatible regions are merged) after the addition.
 
-	Return:
-	0 on success, -errno on failure.
+	-Return:
+	-0 on success, -errno on failure.
 
+	/*	static int __init_memblock memblock_add_range(struct memblock_type *type,
+	 *					phys_addr_t base, phys_addr_t size,
+	 *					int nid, enum memblock_flags flags)
+	 *	{
+	 *		bool insert = false;
+	 *		phys_addr_t obase = base;
+	 *		phys_addr_t end = base + memblock_cap_size(base, &size);
+	 *		int idx, nr_new, start_rgn = -1, end_rgn;
+	 *		struct memblock_region *rgn;
+	 *
+	 *		if (!size)
+	 *			return 0;
+	 *
+	 *		/* special case for empty array */
+	 *		if (type->regions[0].size == 0) {
+	 *			WARN_ON(type->cnt != 0 || type->total_size);
+	 *			type->regions[0].base = base;
+	 *			type->regions[0].size = size;
+	 *			type->regions[0].flags = flags;
+	 *			memblock_set_region_node(&type->regions[0], nid);
+	 *			type->total_size = size;
+	 *			type->cnt = 1;
+	 *			return 0;
+	 *		}
+	 */
+
+	memblock_cap_size checks that base + size does not overflow, if so, it will change size to PHYS_ADDR_MAX - base.
+
+	If size is zero we return early.
+
+	The first time that this fuction gets called, the regions array is empty(indicated by the second if condition), so we just add
+	the new region to the first array element and set type->cnt to 1.
+
+	-The worst case is when new range overlaps all existing regions,
+	-then we'll need type->cnt + 1 empty regions in @type. So if
+	-type->cnt * 2 + 1 is less than or equal to type->max, we know
+	-that there is enough empty regions in @type, and we can insert
+	-regions directly.
+
+	/*	if (type->cnt * 2 + 1 <= type->max)
+	 *			insert = true;
+	 */
+
+	From my understanding, considering the worst case, in order to insert a region with no worries, we need at least (type->max / 2) + 1
+	empty regions. if we don't have that many, then the following code will get executed twice.
+
+	-The following is executed twice.  Once with %false @insert and
+	-then with %true.  The first counts the number of regions needed
+	-to accommodate the new area.  The second actually inserts them.
+
+	/*repeat:
+	 *
+	 *	base = obase;
+	 *	nr_new = 0;
+	 *
+	 *	for_each_memblock_type(idx, type, rgn) {
+	 *		phys_addr_t rbase = rgn->base;
+	 *		phys_addr_t rend = rbase + rgn->size;
+	 *
+	 *		if (rbase >= end)
+	 *			break;
+	 *		if (rend <= base)
+	 *			continue;
+	 */
+
+	We iterate over all regions in _type_ and check for overlaps.
+	If the chosen region's base address(rbase) is greater or equal to end address of the new region we want to insert(end),
+	this means that we went pass the end of our new region and no overlaps was found, so we break out of loop.
+
+	(rbase >= end) if true:
+		/*
+		 *	__________|_______
+		 *     new region)|[rbase)
+		 *	__________|_______
+		 */
+	If the previous condition is not true, it means the chosen region is before the end of new region, so we have check
+	that the chosen region ends before the beginning of the new region. If so, no overlap occurs and we continue to the
+	next iteration of for loop util we pass the new region or overflow occurs.
+
+	(rend <= base) if true:
+		/*
+		 *	__________|_______
+		 *           rend)|[base)
+		 *	__________|_______
+		 */
+
+	for_each_memblock_type is defined like this:
+
+	 /*	#define for_each_memblock_type(i, memblock_type, rgn)			\
+	 *		for (i = 0, rgn = &memblock_type->regions[0];			\
+	 *		     i < memblock_type->cnt;					\
+	 *		     i++, rgn = &memblock_type->regions[i])
+	 */
+
+	If neither of above conditions met, it means there is an overflow. :)
+	This means that the chosen region starts before the end of the new region(rbase < end)
+	and ends after the start of the new region(rend > base).
+
+	(rbase < end) && (rend > base):
+		/*
+		 * rbase <= base:
+		 *	for this scenario we just need to move _base_ forward to get rid of overlap.
+		 *
+		 *			 new region
+		 *			<------------------>
+		 *		         (base)              (end)
+		 *	                /		    /
+		 *	     |__________|_______|___________|
+		 *	     |          |overlap|  insert   |
+		 *	     |__________|_______|___________|
+		 *	     /                  /
+		 *    (rbase)		  (rend)
+		 *            <---------------->
+		 *	       chosen region
+		 *
+		 * rbase > base:
+		 *	for this we first need to isolate the area before chosen region [base,rbase) and
+		 *	insert it as a new region. after that, we move _base_ forward to get rid of overlap.
+		 *
+		 *			new region
+		 *	     <----------------------------->|
+		 *	      (base)                         (end)
+		 *	     /           		    /
+		 *	     |__________|_______|___________|
+		 *	     |  insert  |overlap|  insert   |
+		 *	     |__________|_______|___________|
+		 *	               /       /
+		 *              (rbase)  (rend)
+		 *                       <----->
+		 *	              chosen region
+		 *
+		 * rbase <= base && rend >= end:
+		 *	right now the totality of new region is contained and doesn't need to be added to memblock.
+		 *	we move _base_ with min(rend, end) and as a result _base_ equals _end_, indicating that
+		 *	region doesn't need to be added and return.
+		 *
+		 *			new region
+		 *	                 <----->
+		 *	                 (base)  (end)
+		 *	                /       /
+		 *	     |__________|_______|___________|
+		 *	     |          |overlap|	    |
+		 *	     |__________|_______|___________|
+		 *          /                              /
+		 *   (rbase)                         (rend)
+		 *            <---------------------------->
+		 *	              chosen region
+		 *
+		 * rbase > base && rend >= end:
+		 *	for this situation, we need to isolate the section before overlap [base,rbase), and
+		 *	insert it to memblock. then, we move _base_ to _end_, again this will cause the function
+		 *	to return.
+		 *
+		 *	          new region
+		 *	      <---------------->
+		 *	       (base)             (end)
+		 *	      /	         	 /
+		 *	     |__________|_______|___________|
+		 *	     |  insert  |overlap|	    |
+		 *	     |__________|_______|___________|
+		 *	               /                   /
+		 *              (rbase)		     (rend)
+		 *                       <----------------->
+		 *	                    chosen region
+		 */
+
+	-@rgn overlaps.  If it separates the lower part of new
+	-area, insert that portion.
+
+	/*		if (rbase > base) {
+	 *#ifdef CONFIG_NUMA
+	 *			WARN_ON(nid != memblock_get_region_node(rgn));
+	 *#endif
+	 *			WARN_ON(flags != rgn->flags);
+	 *			nr_new++;
+	 *			if (insert) {
+	 *				if (start_rgn == -1)
+	 *					start_rgn = idx;
+	 *				end_rgn = idx + 1;
+	 *				memblock_insert_region(type, idx++, base,
+	 *						       rbase - base, nid,
+	 *						       flags);
+	 *			}
+	 *		}
+	 *		/* area below @rend is dealt with, forget about it */
+	 *		base = min(rend, end);
+	 *	}
+	 */
+
+	The diagrams drawn above should help you understand this bit of code. if _rbase_ is bigger than _base_,
+	it means that there is an area before the overflow at [base,rbase) that needs to be added to memblock separately.
+
+	nr_new counts the number of regions that will be added to memblock. When this whole block of code(starting
+	at repeat label) gets executed with _insert_ = %false, we don't add any region to memblock, we only count
+	the number of regions that will be added to check to see if we have enough entries in the regions array.
+
+	start_rgn is set to the first index at which we inserted a region. end_rgn is set to one after the last index
+	at which we inserted a region. these two are used when we check for compatible regions to merge in memblock_merge_regions.
+
+
+	/*	/* insert the remaining portion */
+	 *	if (base < end) {
+	 *		nr_new++;
+	 *		if (insert) {
+	 *			if (start_rgn == -1)
+	 *				start_rgn = idx;
+	 *			end_rgn = idx + 1;
+	 *			memblock_insert_region(type, idx, base, end - base,
+	 *					       nid, flags);
+	 *		}
+	 *	}
+	 *
+	 *	if (!nr_new)
+	 *		return 0;
+	 *
+	 *	/*
+	 *	 * If this was the first round, resize array and repeat for actual
+	 *	 * insertions; otherwise, merge and return.
+	 *	 */
+	 *	if (!insert) {
+	 *		while (type->cnt + nr_new > type->max)
+	 *			if (memblock_double_array(type, obase, size) < 0)
+	 *				return -ENOMEM;
+	 *		insert = true;
+	 *		goto repeat;
+	 *	} else {
+	 *		memblock_merge_regions(type, start_rgn, end_rgn);
+	 *		return 0;
+	 *	}
+	 *}
+	 */
+
+	After the for loop, if _base_ is less than _end_, it means there's region that must be added.
+	(Again study the diagrams I drawn). There are cases which result in _base_ == _end_.
+
+	If _insert_ is false, check to see if we have enough entries in array. If so, set it to true and
+	goto to repeat. If we don't have enough space, call memblock_double_array to allocate new space until
+	we have enough entries to insert new regions.
+
+	Otherwise, call memblock_merge_regions and pass it start_rgn and end_rgn to find and merge continuous.
+
+1.2.5 memblock_insert_region:
+
+1.2.6 memblock_double_array:
+
+1.2.7 memblock_merge_regions:
