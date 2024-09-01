@@ -1,29 +1,31 @@
 0. Prologue
 1. Initialization
+2. Memblock
 
 
-
-0.1. Prologue
+0. Prologue
 
 	These are the notes that I took while studing the Memory Management subsystem of Linux. When it comes to arch-specific details I only
-	consider x86-64(sometimes I do mention certain 32-bit specific details). when I study a certain part of Linux, I will always choose
+	consider x86_64(sometimes I do mention certain 32-bit specific details). when I study a certain part of Linux, I will always choose
 	the latest stable version. I will state the version of Linux when I'm taking these notes.
 
-0.2. Note style
+ 0.1. Note style
 
-	Aside from my notes, I incorporate both codes and comments from source code. Code blocks and function graphs are enclosed inside c-style
+	Aside from my notes, I incorporate both codes and comments from the source code. Code blocks and function graphs are enclosed inside c-style
 	multi-line comments(within /* ... */) while comments and documentations from source code are preceded by hyphens(-).
 	I decided to use hyphens to distinguish my own notes from linux's comments.
 
-1.1. Initialization
+1. Initialization
 
-	/* fuctions to study(in call order, Linux 6.9):
+	/* fuctions to study(in call order):
 	 *
 	 * start_kernel -+--> setup_arch
 	 * 		 |
 	 *		 +--> mm_core_init
          *
-	 * setup_arch -+-> e820__memblock_setup
+	 * setup_arch -+-> memblock_set_current_limit
+	 *	       |
+	 *	       +-> e820__memblock_setup
 	 *	       |
 	 *	       +-> initmem_init
 	 *	       |
@@ -34,11 +36,34 @@
 	 * mm_core_init -+-> mem_init
 	 */
 
+ 1.1 e820__memblock_setup & memblock_set_current_limit:
 
-1.2. Memblock:
-	memblock is used to manage and allocate memory at early boot before page allocator is ready. All memblock memory is freed by mem_init inside mm_core_init.
+	this is the function that initializes memblock data structures using the bootloader-supplied e820 map.
+	It iterates over the e820 table and adds the ranges of memory to memblock data structures using memblock_add or memblock_reserve.
+	both memblock_add and memblock_reserve, internally call memblock_add_range to add their memory to memblock.
+	memblock_add adds memory to memblock.memory while memblock_reserve adds to memblock.reserved.
+	Both memblock.memory and memblock.reserved can have up to 128 entries in the regions array, but that is sometimes not enough, for example,
+	the e820 map might supply more than 128 regions, thus we allow for resizing by calling memblock_allow_resize in the beginning.
+	For a detailed explanation of memblock, check out Chapter 2.
 
-1.2.1 Important memblock data structures:
+	memblock_set_current_limit gets called twice, once before e820__memblock_setup and once after.
+	First time it sets &memblock.current_limit to ISA_END_ADDRESS and second time to the return of get_max_mapped.
+
+ 1.2 initmem_init:
+
+	if CONFIG_NUMA is enabled, it calls x86_numa_init.
+
+  1.2.1 x86_numa_init:
+
+
+
+
+2. Memblock:
+
+	memblock is used to manage and allocate memory at early boot before page allocator is ready.
+	All memblock memory is freed by mem_init inside mm_core_init.
+
+ 2.1 Important memblock data structures:
 
 	/*	struct memblock {				// memblock allocator metadata
 	 *		bool bottom_up;                         // @bottom_up: is bottom up direction?
@@ -77,7 +102,14 @@
 	 *	};
 	 */
 
-1.2.1.1 Global memblock data structure in mm/memblock.c :
+  2.1.1 Global memblock data structure in mm/memblock.c :
+
+	/*	static struct memblock_region memblock_memory_init_regions[INIT_MEMBLOCK_MEMORY_REGIONS] __initdata_memblock;
+	 *	static struct memblock_region memblock_reserved_init_regions[INIT_MEMBLOCK_RESERVED_REGIONS] __initdata_memblock;
+	 *	#ifdef CONFIG_HAVE_MEMBLOCK_PHYS_MAP
+	 *	static struct memblock_region memblock_physmem_init_regions[INIT_PHYSMEM_REGIONS];
+	 *	#endif
+	 */
 
 	/*	struct memblock memblock __initdata_memblock = {
 	 *		.memory.regions		= memblock_memory_init_regions,
@@ -93,16 +125,9 @@
 	 *	};
 	 */
 
-1.2.2 e820__memblock_setup:
+ 2.2 Memblock initialization
 
-	this is the function that initializes memblock data structures using the bootloader-supplied e820 map.
-	It iterates over the e820 table and adds the ranges of memory to memblock data structures using memblock_add or memblock_reserve.
-	both memblock_add and memblock_reserve, internally call memblock_add_range to add their memory to memblock.
-	memblock_add adds memory to memblock.memory while memblock_reserve adds to memblock.reserved.
-	Both memblock.memory and memblock.reserved can have up to 128 entries in the regions array, but that is sometimes not enough, for example,
-	the e820 map might supply more than 128 regions, thus we allow for resizing by calling memblock_allow_resize in the beginning.
-
-1.2.3 memblock_add and memblock_reserve:
+  2.2.1 memblock_add and memblock_reserve:
 
 	/*	int __init_memblock memblock_add(phys_addr_t base, phys_addr_t size)
 	 *	{
@@ -119,7 +144,7 @@
 	 except that it chooses &memblock.reserved instead.
 
 
-1.2.4 memblock_add_range:
+  2.2.2 memblock_add_range:
 
 	-memblock_add_range - add new memblock region
 	-@type: memblock type to add new region into
@@ -180,7 +205,7 @@
 	 */
 
 	From my understanding, considering the worst case, in order to insert a region with no worries, we need at least (type->max / 2) + 1
-	empty regions. if we don't have that many, then the following code will get executed twice.
+	empty regions. if we don't have that many, then the following code will get executed twice. there's a diagram below explaining this. :)
 
 	-The following is executed twice.  Once with %false @insert and
 	-then with %true.  The first counts the number of regions needed
@@ -300,6 +325,22 @@
 		 *              (rbase)		     (rend)
 		 *                       <----------------->
 		 *	                    chosen region
+		 *
+		 * Regarding the worst case scenario:
+		 *	worst case would be a new area encompassing all existing regions like the following:
+		 *
+		 *	          new region
+		 *	      <---------------->
+		 *	       (base)            									  (end)
+		 *	      /	         	 								         /
+		 *	     |___________|_______|___________|_______|__________ ....... __________|_______|____________|
+		 *	     |  insert1  |overlap|  insert2  |overlap| insert3		  insertN  |overlap|  insertN+1 |
+		 *	     |___________|_______|___________|_______|__________ ....... __________|_______|____________|
+		 *	                /       /	    /       /				  /       /
+		 *              (rbase1) (rend1)    (rbase2) (rend2)			 ( rbaseN) (rendN)
+		 *
+		 *	so we need N+1 entries to insert new regions. that's why we check to have (type->cnt * 2 + 1 <= type->max)
+		 *	available entries in the array.
 		 */
 
 	-@rgn overlaps.  If it separates the lower part of new
@@ -377,8 +418,1032 @@
 
 	Otherwise, call memblock_merge_regions and pass it start_rgn and end_rgn to find and merge continuous.
 
-1.2.5 memblock_insert_region:
+  2.2.3 memblock_insert_region:
 
-1.2.6 memblock_double_array:
+	-memblock_insert_region - insert new memblock region
+	-@type:		memblock type to insert into
+	-@idx:		index for the insertion point
+	-@base:		base address of the new region
+	-@size:		size of the new region
+	-@nid:		node id of the new region
+	-@flags:	flags of the new region
+	-Insert new memblock region [@base, @base + @size) into @type at @idx.
+	-@type must already have extra room to accommodate the new region.
 
-1.2.7 memblock_merge_regions:
+	/*	static void __init_memblock memblock_insert_region(struct memblock_type *type,
+	 *							   int idx, phys_addr_t base,
+	 *							   phys_addr_t size,
+	 *							   int nid,
+	 *							   enum memblock_flags flags)
+	 *	{
+	 *		struct memblock_region *rgn = &type->regions[idx];
+	 *
+	 *		BUG_ON(type->cnt >= type->max);
+	 *		memmove(rgn + 1, rgn, (type->cnt - idx) * sizeof(*rgn));
+	 *		rgn->base = base;
+	 *		rgn->size = size;
+	 *		rgn->flags = flags;
+	 *		memblock_set_region_node(rgn, nid);
+	 *		type->cnt++;
+	 *		type->total_size += size;
+	 *	}
+	 */
+
+	Pretty self-explanatory:). (just a reminder, we use memmove because regions are overlapping)
+
+  2.2.4 memblock_merge_regions:
+
+	-memblock_merge_regions - merge neighboring compatible regions
+	-@type: memblock type to scan
+	-@start_rgn: start scanning from (@start_rgn - 1)
+	-@end_rgn: end scanning at (@end_rgn - 1)
+	-Scan @type and merge neighboring compatible regions in [@start_rgn - 1, @end_rgn)
+
+	/*	static void __init_memblock memblock_merge_regions(struct memblock_type *type,
+	 *							   unsigned long start_rgn,
+	 *							   unsigned long end_rgn)
+	 *	{
+	 *		int i = 0;
+	 *		if (start_rgn)
+	 *			i = start_rgn - 1;
+	 *		end_rgn = min(end_rgn, type->cnt - 1);
+	 *		while (i < end_rgn) {
+	 *			struct memblock_region *this = &type->regions[i];
+	 *			struct memblock_region *next = &type->regions[i + 1];
+	 *
+	 *			if (this->base + this->size != next->base ||
+	 *			    memblock_get_region_node(this) !=
+	 *			    memblock_get_region_node(next) ||
+	 *			    this->flags != next->flags) {
+	 *				BUG_ON(this->base + this->size > next->base);
+	 *				i++;
+	 *				continue;
+	 *			}
+	 *
+	 *			this->size += next->size;
+	 *			/* move forward from next + 1, index of which is i + 2 */
+	 *			memmove(next, next + 1, (type->cnt - (i + 2)) * sizeof(*next));
+	 *			type->cnt--;
+	 *			end_rgn--;
+	 *		}
+	 *	}
+	 */
+
+	Not much to say here either. The code pretty easy to digest.
+
+  2.2.5 memblock_double_array:
+
+	-memblock_double_array - double the size of the memblock regions array
+	-@type: memblock type of the regions array being doubled
+	-@new_area_start: starting address of memory range to avoid overlap with
+	-@new_area_size: size of memory range to avoid overlap with
+
+	-Double the size of the @type regions array. If memblock is being used to
+	-allocate memory for a new reserved regions array and there is a previously
+	-allocated memory range [@new_area_start, @new_area_start + @new_area_size]
+	-waiting to be reserved, ensure the memory used by the new array does
+	-not overlap.
+
+	-Return:
+	-0 on success, -1 on failure.
+
+	/*	static int __init_memblock memblock_double_array(struct memblock_type *type,
+	 *							phys_addr_t new_area_start,
+	 *							phys_addr_t new_area_size)
+	 *	{
+	 *		struct memblock_region *new_array, *old_array;
+	 *		phys_addr_t old_alloc_size, new_alloc_size;
+	 *		phys_addr_t old_size, new_size, addr, new_end;
+	 *		int use_slab = slab_is_available();
+	 *		int *in_slab;
+	 *
+	 *		/* We don't allow resizing until we know about the reserved regions
+	 *		 * of memory that aren't suitable for allocation
+	 *		 */
+	 *		if (!memblock_can_resize)
+	 *			panic("memblock: cannot resize %s array\n", type->name);
+	 *
+	 *		/* Calculate new doubled size */
+	 *		old_size = type->max * sizeof(struct memblock_region);
+	 *		new_size = old_size << 1;
+	 *
+	 *		/*
+	 *		 * We need to allocated new one align to PAGE_SIZE,
+	 *		 *   so we can free them completely later.
+	 *		 */
+	 *		old_alloc_size = PAGE_ALIGN(old_size);
+	 *		new_alloc_size = PAGE_ALIGN(new_size);
+	 *
+	 *		/* Retrieve the slab flag */
+	 *		if (type == &memblock.memory)
+	 *			in_slab = &memblock_memory_in_slab;
+	 *		else
+	 *			in_slab = &memblock_reserved_in_slab;
+	 */
+
+
+
+	/* 		/* Try to find some space for it */
+	 *		if (use_slab) {
+	 *			new_array = kmalloc(new_size, GFP_KERNEL);
+	 *			addr = new_array ? __pa(new_array) : 0;
+	 *		} else {
+	 *			/* only exclude range when trying to double reserved.regions */
+	 *			if (type != &memblock.reserved)
+	 *				new_area_start = new_area_size = 0;
+ 	 *
+	 *			addr = memblock_find_in_range(new_area_start + new_area_size,
+	 *							memblock.current_limit,
+	 *							new_alloc_size, PAGE_SIZE);
+	 *			if (!addr && new_area_size)
+	 *				addr = memblock_find_in_range(0,
+	 *					min(new_area_start, memblock.current_limit),
+	 *					new_alloc_size, PAGE_SIZE);
+	 *
+	 *			new_array = addr ? __va(addr) : NULL;
+	 *		}
+	 */
+
+
+	/*		if (!addr) {
+	 *			pr_err("memblock: Failed to double %s array from %ld to %ld entries !\n",
+	 *			       type->name, type->max, type->max * 2);
+	 *			return -1;
+	 *		}
+	 *
+	 *		new_end = addr + new_size - 1;
+	 *		memblock_dbg("memblock: %s is doubled to %ld at [%pa-%pa]",
+	 *				type->name, type->max * 2, &addr, &new_end);
+	 *
+	 *		/*
+	 *		 * Found space, we now need to move the array over before we add the
+	 *		 * reserved region since it may be our reserved array itself that is
+	 *		 * full.
+	 *		 */
+	 *		memcpy(new_array, type->regions, old_size);
+	 *		memset(new_array + type->max, 0, old_size);
+	 *		old_array = type->regions;
+	 *		type->regions = new_array;
+	 *		type->max <<= 1;
+	 *
+	 *		/* Free old array. We needn't free it if the array is the static one */
+	 *		if (*in_slab)
+	 *			kfree(old_array);
+	 *		else if (old_array != memblock_memory_init_regions &&
+	 *			 old_array != memblock_reserved_init_regions)
+	 *			memblock_free(old_array, old_alloc_size);
+	 *
+	 *		/*
+	 *		 * Reserve the new array if that comes from the memblock.  Otherwise, we
+	 *		 * needn't do it
+	 *		 */
+	 *		if (!use_slab)
+	 *			BUG_ON(memblock_reserve(addr, new_alloc_size));
+	 *
+	 *		/* Update slab flag */
+	 *		*in_slab = use_slab;
+	 *
+	 *		return 0;
+	 *	}
+	 */
+
+ 2.3 Memblock allocation and deallocation
+
+	Basically, allocation consists of finding out a range within &memblock.memory and inserting it to
+	&memblock.reserved.
+	In other words, &memblock.memory represents free and allocatable memory while &memblock.reserved represents
+	allocated memory or memory that shouldn't be allocated(for architectural reasons).
+
+	Note that, when we insert a region from &memblock.memory into &memblock.reserved, we don't remove it
+	from &memblock.memory. So, the region exists in both memblock_type.
+	that's why upon allocation, when we select a region(within __next_mem_range and __next_mem_range_rev),
+	we also check to see whether the seleceted region resides in &memblock.reserved or not.
+	I suppose they did this because it's cheaper to search &memblock.reserved rather than completely removing
+	the region from &memblock.memory(less calls to memmove?).
+	The process of freeing memory is the exact opposite, we exclude the range from &memblock.reserved and
+	insert it into &memblock.memory(by calling memblock_remove_range).
+
+	/* API call graphs:
+	 *
+	 *	memblock_alloc_raw ---------> memblock_alloc_try_nid_raw +
+	 *	memblock_alloc ---------+				 |
+	 *	memblock_alloc_from ----|				 |
+	 *	memblock_alloc_low -----|				 |
+	 *	memblock_alloc_node ----+---> memblock_alloc_try_nid ----+--> memblock_alloc_internal --+--> memblock_alloc_range_nid
+	 *												|
+	 *	memblock_phys_alloc_range ---+----------------------------------------------------------+
+	 *	memblock_phys_alloc_try_nid -+
+	 */
+
+
+  2.3.1 Allocation API
+
+	There are 5 allocation APIs:
+
+		/*	memblock_alloc(size, align)
+		 *	memblock_alloc_raw(size, align)
+		 *	memblock_alloc_from(size, align, min_addr)
+		 *	memblock_alloc_low(size, align)
+		 *	memblock_alloc_node(size, align, int nid)
+		 */
+
+	They all require _size_ and _align_ to allocate memory(both are type phys_addr_t).
+	They all return virtual address of the allocated block.
+	They all zero out the memory block before returning except for memblock_alloc_raw.
+	They all are function wrappers that internally call memblock_alloc_try_nid and
+	memblock_alloc_try_nid_raw for _raw variant.
+
+		/*	void *memblock_alloc_try_nid(size, align, min_addr, max_addr, nid);
+		 *	void *memblock_alloc_try_nid_raw(size, align, min_addr, max_addr, nid);
+		 */
+
+		/*	#define MEMBLOCK_ALLOC_ANYWHERE	(~(phys_addr_t)0)
+		 *	#define MEMBLOCK_ALLOC_ACCESSIBLE	0
+		 *	#define MEMBLOCK_ALLOC_NOLEAKTRACE	1
+		 *
+		 *	/* We are using top down, so it is safe to use 0 here */
+		 *	#define MEMBLOCK_LOW_LIMIT 0
+		 *
+		 *	#ifndef ARCH_LOW_ADDRESS_LIMIT
+		 *	#define ARCH_LOW_ADDRESS_LIMIT  0xffffffffUL // full 32-bit
+		 *	#endif
+		 */
+
+	MEMBLOCK_ALLOC_ACCESSIBLE to allocate memory limited by &memblock.current_limit.
+	NUMA_NO_NODE for any node.
+	MEMBLOCK_LOW_LIMIT lower limit of allocation.
+	ARCH_LOW_ADDRESS_LIMIT some archs with small physical address space, use a portion of that
+	for things like DMA, so we can't use those memory for normal allocation.
+
+
+	memblock_alloc:
+
+		/*	static __always_inline void *memblock_alloc(phys_addr_t size, phys_addr_t align)
+		 *	{
+		 *		return memblock_alloc_try_nid(size, align, MEMBLOCK_LOW_LIMIT,
+		 *					      MEMBLOCK_ALLOC_ACCESSIBLE, NUMA_NO_NODE);
+		 *	}
+		 */
+
+	memblock_alloc_raw:
+
+		/*	static inline void *memblock_alloc_raw(phys_addr_t size,
+		 *						       phys_addr_t align)
+		 *	{
+		 *		return memblock_alloc_try_nid_raw(size, align, MEMBLOCK_LOW_LIMIT,
+		 *						  MEMBLOCK_ALLOC_ACCESSIBLE,
+		 *						  NUMA_NO_NODE);
+		 *	}
+		 */
+
+	memblock_alloc_from:
+
+		/*	static inline void *memblock_alloc_from(phys_addr_t size,
+		 *							phys_addr_t align,
+		 *							phys_addr_t min_addr)
+		 *	{
+		 *		return memblock_alloc_try_nid(size, align, min_addr,
+		 *					      MEMBLOCK_ALLOC_ACCESSIBLE, NUMA_NO_NODE);
+		 *	}
+		 */
+
+	memblock_alloc_low:
+
+		/*	static inline void *memblock_alloc_low(phys_addr_t size,
+		 *						       phys_addr_t align)
+		 *	{
+		 *		return memblock_alloc_try_nid(size, align, MEMBLOCK_LOW_LIMIT,
+		 *					      ARCH_LOW_ADDRESS_LIMIT, NUMA_NO_NODE);
+		 *	}
+		 */
+
+	memblock_alloc_node:
+
+		/*	static inline void *memblock_alloc_node(phys_addr_t size,
+		 *							phys_addr_t align, int nid)
+		 *	{
+		 *		return memblock_alloc_try_nid(size, align, MEMBLOCK_LOW_LIMIT,
+		 *					      MEMBLOCK_ALLOC_ACCESSIBLE, nid);
+		 *	}
+		 */
+
+
+	memblock_alloc_try_nid:
+
+		-memblock_alloc_try_nid - allocate boot memory block
+		-@size: size of memory block to be allocated in bytes
+		-@align: alignment of the region and block's size
+		-@min_addr: the lower bound of the memory region from where the allocation
+		-	  is preferred (phys address)
+		-@max_addr: the upper bound of the memory region from where the allocation
+		-	      is preferred (phys address), or %MEMBLOCK_ALLOC_ACCESSIBLE to
+		-	      allocate only from memory limited by memblock.current_limit value
+		-@nid: nid of the free area to find, %NUMA_NO_NODE for any node
+		-
+		-Public function, provides additional debug information (including caller
+		-info), if enabled. This function zeroes the allocated memory.
+		-
+		-Return:
+		-Virtual address of allocated memory block on success, NULL on failure.
+
+		/*	void * __init memblock_alloc_try_nid(
+		 *				phys_addr_t size, phys_addr_t align,
+		 *				phys_addr_t min_addr, phys_addr_t max_addr,
+		 *				int nid)
+		 *	{
+		 *		void *ptr;
+		 *
+		 *		memblock_dbg("%s: %llu bytes align=0x%llx nid=%d from=%pa max_addr=%pa %pS\n",
+		 *			     __func__, (u64)size, (u64)align, nid, &min_addr,
+		 *			     &max_addr, (void *)_RET_IP_);
+		 *		ptr = memblock_alloc_internal(size, align,
+		 *						   min_addr, max_addr, nid, false);
+		 *		if (ptr)
+		 *			memset(ptr, 0, size);
+		 *
+		 *		return ptr;
+		 *	}
+		 */
+
+		I guess you could use this function directly or make your own wrapper around it if
+		the ones mentioned weren't useful.
+
+		memblock_alloc_try_nid_raw is the same except that it does NOT zero out the the memory.
+
+		Both of these fucntions will TRY to allocate from the specified _nid_(NUMA_NO_NODE for any)
+		but if they fail, they will try other nodes.
+
+		If you want to allocate memory ONLY from the specified node, you must use memblock_alloc_exact_nid_raw.
+		All it does is to pass %TRUE for the last argument of memblock_alloc_internal.
+
+	memblock_phys_alloc_range,
+	memblock_phys_alloc_try_nid:
+
+		All the funtions mentioned so far return virtual address of the allocated memory but these two return physical
+		address.
+
+		/*	phys_addr_t __init memblock_phys_alloc_range(phys_addr_t size,
+		 *						     phys_addr_t align,
+		 *						     phys_addr_t start,
+		 *						     phys_addr_t end)
+		 *
+		 *	phys_addr_t __init memblock_phys_alloc_try_nid(phys_addr_t size, phys_addr_t align, int nid)
+		 */
+
+		Both of these call memblock_alloc_range_nid internally. memblock_alloc_range_nid is examined in the
+		following section.
+
+
+  2.3.2 Allocation internal
+
+	memblock_alloc_internal:
+
+		-memblock_alloc_internal - allocate boot memory block
+		-@size: size of memory block to be allocated in bytes
+		-@align: alignment of the region and block's size
+		-@min_addr: the lower bound of the memory region to allocate (phys address)
+		-@max_addr: the upper bound of the memory region to allocate (phys address)
+		-@nid: nid of the free area to find, %NUMA_NO_NODE for any node
+		-@exact_nid: control the allocation fall back to other nodes
+		-
+		-Allocates memory block using memblock_alloc_range_nid() and
+		-converts the returned physical address to virtual.
+		-
+		-The @min_addr limit is dropped if it can not be satisfied and the allocation
+		-will fall back to memory below @min_addr. Other constraints, such
+		-as node and mirrored memory will be handled again in
+		-memblock_alloc_range_nid().
+		-
+		-Return:
+		-Virtual address of allocated memory block on success, NULL on failure.
+
+		/*	static void * __init memblock_alloc_internal(
+		 *					phys_addr_t size, phys_addr_t align,
+		 *					phys_addr_t min_addr, phys_addr_t max_addr,
+		 *					int nid, bool exact_nid)
+		 *	{
+		 *		phys_addr_t alloc;
+		 *
+		 *
+		 *		if (max_addr > memblock.current_limit)
+		 *			max_addr = memblock.current_limit;
+		 *
+		 *		alloc = memblock_alloc_range_nid(size, align, min_addr, max_addr, nid,
+		 *						exact_nid);
+		 *
+		 *		/* retry allocation without lower limit */
+		 *		if (!alloc && min_addr)
+		 *			alloc = memblock_alloc_range_nid(size, align, 0, max_addr, nid,
+		 *							exact_nid);
+		 *
+		 *		if (!alloc)
+		 *			return NULL;
+		 *
+		 *		return phys_to_virt(alloc);
+		 *	}
+		 */
+
+	memblock_alloc_range_nid:
+
+
+		-memblock_alloc_range_nid - allocate boot memory block
+		-@size: size of memory block to be allocated in bytes
+		-@align: alignment of the region and block's size
+		-@start: the lower bound of the memory region to allocate (phys address)
+		-@end: the upper bound of the memory region to allocate (phys address)
+		-@nid: nid of the free area to find, %NUMA_NO_NODE for any node
+		-@exact_nid: control the allocation fall back to other nodes
+		-
+		-The allocation is performed from memory region limited by
+		-memblock.current_limit if @end == %MEMBLOCK_ALLOC_ACCESSIBLE.
+		-
+		-If the specified node can not hold the requested memory and @exact_nid
+		-is false, the allocation falls back to any node in the system.
+		-
+		-For systems with memory mirroring, the allocation is attempted first
+		-from the regions with mirroring enabled and then retried from any
+		-memory region.
+		-
+		-In addition, function using kmemleak_alloc_phys for allocated boot
+		-memory block, it is never reported as leaks.
+		-
+		-Return:
+		-Physical address of allocated memory block on success, %0 on failure.
+
+		/*	phys_addr_t __init memblock_alloc_range_nid(phys_addr_t size,
+		 *						phys_addr_t align, phys_addr_t start,
+		 *						phys_addr_t end, int nid,
+		 *						bool exact_nid)
+		 *	{
+		 *		enum memblock_flags flags = choose_memblock_flags();
+		 *		phys_addr_t found;
+		 *
+		 *		/*
+		 *		 * Detect any accidental use of these APIs after slab is ready, as at
+		 *		 * this moment memblock may be deinitialized already and its
+		 *		 * internal data may be destroyed (after execution of memblock_free_all)
+		 *		 */
+		 *		if (WARN_ON_ONCE(slab_is_available())) {
+		 *			void *vaddr = kzalloc_node(size, GFP_NOWAIT, nid);
+		 *
+		 *			return vaddr ? virt_to_phys(vaddr) : 0;
+		 *		}
+		 *
+		 *		if (!align) {
+		 *			/* Can't use WARNs this early in boot on powerpc */
+		 *			dump_stack();
+		 *			align = SMP_CACHE_BYTES;
+		 *		}
+		 *
+		 *	again:
+		 *		found = memblock_find_in_range_node(size, align, start, end, nid,
+		 *						    flags);
+		 *		if (found && !memblock_reserve(found, size))
+		 *			goto done;
+		 *
+		 *		if (numa_valid_node(nid) && !exact_nid) {
+		 *			found = memblock_find_in_range_node(size, align, start,
+		 *							    end, NUMA_NO_NODE,
+		 *							    flags);
+		 *			if (found && !memblock_reserve(found, size))
+		 *				goto done;
+		 *		}
+		 *
+		 *		if (flags & MEMBLOCK_MIRROR) {
+		 *			flags &= ~MEMBLOCK_MIRROR;
+		 *			pr_warn_ratelimited("Could not allocate %pap bytes of mirrored memory\n",
+		 *				&size);
+		 *			goto again;
+		 *		}
+		 *
+		 *		return 0;
+		 *
+		 *	done:
+		 *		/*
+		 *		 * Skip kmemleak for those places like kasan_init() and
+		 *		 * early_pgtable_alloc() due to high volume.
+		 *		 */
+		 *		if (end != MEMBLOCK_ALLOC_NOLEAKTRACE)
+		 *			/*
+		 *			 * Memblock allocated blocks are never reported as
+		 *			 * leaks. This is because many of these blocks are
+		 *			 * only referred via the physical address which is
+		 *			 * not looked up by kmemleak.
+		 *			 */
+		 *			kmemleak_alloc_phys(found, size, 0);
+		 *
+		 *		/*
+		 *		 * Some Virtual Machine platforms, such as Intel TDX or AMD SEV-SNP,
+		 *		 * require memory to be accepted before it can be used by the
+		 *		 * guest.
+		 *		 *
+		 *		 * Accept the memory of the allocated buffer.
+		 *		 */
+		 *		accept_memory(found, found + size);
+		 *
+		 *		return found;
+		 *	}
+		 */
+
+		choose_memblock_flags will set the flag to %MEMBLOCK_MIRROR if kernelcore=mirror was passed as a kernel parameter.
+
+
+
+	memblock_find_in_range:
+
+		All it does is choose flags and call memblock_find_in_range_node with %NUMA_NO_NODE.
+		Used only by memblock_double_array.
+
+	memblock_find_in_range_node:
+
+		/*	static phys_addr_t __init_memblock memblock_find_in_range_node(phys_addr_t size,
+		 *						phys_addr_t align, phys_addr_t start,
+		 *						phys_addr_t end, int nid,
+		 *						enum memblock_flags flags)
+		 *	{
+		 *		/* pump up @end */
+		 *		if (end == MEMBLOCK_ALLOC_ACCESSIBLE ||
+		 *		    end == MEMBLOCK_ALLOC_NOLEAKTRACE)
+		 *			end = memblock.current_limit;
+		 *
+		 *		/* avoid allocating the first page */
+		 *		start = max_t(phys_addr_t, start, PAGE_SIZE);
+		 *		end = max(start, end);
+		 *
+		 *		if (memblock_bottom_up())
+		 *			return __memblock_find_range_bottom_up(start, end, size, align,
+		 *							       nid, flags);
+		 *		else
+		 *			return __memblock_find_range_top_down(start, end, size, align,
+		 *							      nid, flags);
+		 *	}
+		 */
+
+		-We do a top-down search, this tends to limit memory
+		-fragmentation by keeping early boot allocs near the
+		-top of memory
+
+		Above is an old and deleted comment that I've found, it states the reason for top_down allocation.
+
+		-Memory used by the kernel cannot be hot-removed because Linux
+		-cannot migrate the kernel pages. When memory hotplug is
+		-enabled, we should prevent memblock from allocating memory
+		-for the kernel.
+		-
+		-ACPI SRAT records all hotpluggable memory ranges. But before
+		-SRAT is parsed, we don't know about it.
+		-
+		-The kernel image is loaded into memory at very early time. We
+		-cannot prevent this anyway. So on NUMA system, we set any
+		-node the kernel resides in as un-hotpluggable.
+		-
+		-Since on modern servers, one node could have double-digit
+		-gigabytes memory, we can assume the memory around the kernel
+		-image is also un-hotpluggable. So before SRAT is parsed, just
+		-allocate memory near the kernel image to try the best to keep
+		-the kernel away from hotpluggable memory.
+
+		Above explains the reason for bottom_up allocation. Note that allocation direction
+		is set back to top_down after "SRAT is parsed" inside numa_init.
+
+		/*numa_init:
+		 *	-We reset memblock back to the top-down direction
+		 *	-here because if we configured ACPI_NUMA, we have
+		 *	-parsed SRAT in init_func(). It is ok to have the
+		 *	-reset here even if we did't configure ACPI_NUMA
+		 *	-or acpi numa init fails and fallbacks to dummy
+		 *	-numa init.
+		 *
+		 *	memblock_set_bottom_up(false);
+		 */
+
+		For now these comments will suffice, but later when I study the physical memory layout of linux, I will update this section.
+
+	__memblock_find_range_top_down:
+
+		/*	static phys_addr_t __init_memblock
+		 *	__memblock_find_range_top_down(phys_addr_t start, phys_addr_t end,
+		 *				       phys_addr_t size, phys_addr_t align, int nid,
+		 *				       enum memblock_flags flags)
+		 *	{
+		 *		phys_addr_t this_start, this_end, cand;
+		 *		u64 i;
+		 *
+		 *		for_each_free_mem_range_reverse(i, nid, flags, &this_start, &this_end,
+		 *						NULL) {
+		 *			this_start = clamp(this_start, start, end);
+		 *			this_end = clamp(this_end, start, end);
+		 *
+		1*			if (this_end < size)
+		 *				continue;
+		 *
+		2*			cand = round_down(this_end - size, align);
+		 *			if (cand >= this_start)
+		 *				return cand;
+		 *		}
+		 *
+		 *		return 0;
+		 *	}
+		 */
+
+		1*. Clearly if _this_end_ is less than _size_, it means the range is too small and also it'll result
+		    in overflow at 2*.
+
+		2*. From what I understand, when we get a free range, we want to take what we need from the end of the
+		    chosen range. This is because in some cases we might get a huge range(in early allocs where most of
+		    memory is free), and if we choose to take from _this_start_, it might result in fragmentation.
+		    Following diagram should make things clear.
+
+		/* (this_start)		      (this_end - size)			        (this_end)
+		 *             \			       \		       /
+		 *		|_______________________________|_____________________|
+		 *      	|				|		      |
+		 *		|_______________________________|_____________________|
+		 */
+
+		    And because moving backward from the end of range, in the case we need to align, we choose round_down.
+
+	 	/* for_each_free_mem_range_reverse:
+		 *
+		 *	#define for_each_free_mem_range_reverse(i, nid, flags, p_start, p_end,	\
+		 *						p_nid)				\
+		 *		__for_each_mem_range_rev(i, &memblock.memory, &memblock.reserved, \
+		 *					 nid, flags, p_start, p_end, p_nid)
+		 */
+
+		-for_each_free_mem_range_reverse - rev-iterate through free memblock areas
+		-@i: u64 used as loop variable
+		-@nid: node selector, %NUMA_NO_NODE for all nodes
+		-@flags: pick from blocks based on memory attributes
+		-@p_start: ptr to phys_addr_t for start address of the range, can be %NULL
+		-@p_end: ptr to phys_addr_t for end address of the range, can be %NULL
+		-@p_nid: ptr to int for nid of the range, can be %NULL
+		-
+		-Walks over free (memory && !reserved) areas of memblock in reverse
+		-order.  Available as soon as memblock is initialized.
+
+	 	/* __for_each_mem_range_rev:
+		 *
+		 *	#define __for_each_mem_range_rev(i, type_a, type_b, nid, flags,		\
+		 *					 p_start, p_end, p_nid)			\
+		 *		for (i = (u64)ULLONG_MAX,					\
+		 *			     __next_mem_range_rev(&i, nid, flags, type_a, type_b, \
+		 *						  p_start, p_end, p_nid);	\
+		 *		     i != (u64)ULLONG_MAX;					\
+		 *		     __next_mem_range_rev(&i, nid, flags, type_a, type_b,	\
+		 *					  p_start, p_end, p_nid))
+		 */
+
+		-__for_each_mem_range_rev - reverse iterate through memblock areas from
+		-type_a and not included in type_b. Or just type_a if type_b is NULL.
+		-@i: u64 used as loop variable
+		-@type_a: ptr to memblock_type to iterate
+		-@type_b: ptr to memblock_type which excludes from the iteration
+		-@nid: node selector, %NUMA_NO_NODE for all nodes
+		-@flags: pick from blocks based on memory attributes
+		-@p_start: ptr to phys_addr_t for start address of the range, can be %NULL
+		-@p_end: ptr to phys_addr_t for end address of the range, can be %NULL
+		-@p_nid: ptr to int for nid of the range, can be %NULL
+
+	__next_mem_range_rev:
+
+		-__next_mem_range_rev - generic next function for for_each_*_range_rev()
+		-
+		-@idx: pointer to u64 loop variable
+		-@nid: node selector, %NUMA_NO_NODE for all nodes
+		-@flags: pick from blocks based on memory attributes
+		-@type_a: pointer to memblock_type from where the range is taken
+		-@type_b: pointer to memblock_type which excludes memory from being taken
+		-@out_start: ptr to phys_addr_t for start address of the range, can be %NULL
+		-@out_end: ptr to phys_addr_t for end address of the range, can be %NULL
+		-@out_nid: ptr to int for nid of the range, can be %NULL
+		-
+		-Finds the next range from type_a which is not marked as unsuitable
+		-in type_b.
+		-
+		-Reverse of __next_mem_range().
+
+		/*	void __init_memblock __next_mem_range_rev(u64 *idx, int nid,
+		 *						  enum memblock_flags flags,
+		 *						  struct memblock_type *type_a,
+		 *						  struct memblock_type *type_b,
+		 *						  phys_addr_t *out_start,
+		 *						  phys_addr_t *out_end, int *out_nid)
+		 *	{
+		 *		int idx_a = *idx & 0xffffffff;
+		 *		int idx_b = *idx >> 32;
+		 *
+		 *		if (*idx == (u64)ULLONG_MAX) {
+		 *			idx_a = type_a->cnt - 1;
+		 *			if (type_b != NULL)
+		 *				idx_b = type_b->cnt;
+		 *			else
+		 *				idx_b = 0;
+		 *		}
+		 */
+
+		_idx_ is used to store the array index of both type_a and type_b. the first 32 bit is the index of type_a and
+		the last 32 bit is the index of type_b. First time we call this fucntion, we set _idx_ to (u64)ULLONG_MAX to tell
+		the fucntion to set idx_a and idx_b to appropriate values.
+
+		idx_a is set type_a->cnt - 1, obviously because we want to iterate over elements of type_a->regions. But, we set
+		idx_b to type_b->cnt, because we want to find the regions that type_b doesn't cover. I'll draw some figure to
+		help you understand.
+
+		/*	for (; idx_a >= 0; idx_a--) {
+		 *			struct memblock_region *m = &type_a->regions[idx_a];
+		 *
+		 *			phys_addr_t m_start = m->base;
+		 *			phys_addr_t m_end = m->base + m->size;
+		 *			int m_nid = memblock_get_region_node(m);
+		 *
+		 *			if (should_skip_region(type_a, m, nid, flags))
+		 *				continue;
+		 *
+		 *			if (!type_b) {
+		 *				if (out_start)
+		 *					*out_start = m_start;
+		 *				if (out_end)
+		 *					*out_end = m_end;
+		 *				if (out_nid)
+		 *					*out_nid = m_nid;
+		 *				idx_a--;
+		 *				*idx = (u32)idx_a | (u64)idx_b << 32;
+		 *				return;
+		 *			}
+		 *
+		 *
+		 *
+	 	 *			/* scan areas before each reservation */
+		 *			for (; idx_b >= 0; idx_b--) {
+		 *				struct memblock_region *r;
+		 *				phys_addr_t r_start;
+		 *				phys_addr_t r_end;
+		 *
+	 	 *				r = &type_b->regions[idx_b];
+		 *				r_start = idx_b ? r[-1].base + r[-1].size : 0;
+		 *				r_end = idx_b < type_b->cnt ?
+		 *					r->base : PHYS_ADDR_MAX;
+		 *				/*
+		 *				 * if idx_b advanced past idx_a,
+		 *				 * break out to advance idx_a
+		 *				 */
+		 *
+	 	 *				if (r_end <= m_start)
+		 *					break;
+		 *				/* if the two regions intersect, we're done */
+		 *				if (m_end > r_start) {
+		 *					if (out_start)
+		 *						*out_start = max(m_start, r_start);
+		 *					if (out_end)
+		 *						*out_end = min(m_end, r_end);
+		 *					if (out_nid)
+		 *						*out_nid = m_nid;
+		 *					if (m_start >= r_start)
+		 *						idx_a--;
+		 *					else
+		 *						idx_b--;
+		 *					*idx = (u32)idx_a | (u64)idx_b << 32;
+		 *					return;
+		 *				}
+		 *			}
+		 *		}
+		 *		/* signal end of iteration */
+		 *		*idx = ULLONG_MAX;
+		 *	}
+		 */
+
+		/*
+		 *	within the inner for loop, we're want to find the regions that type_b doesn't cover and
+		 *	compare it with the selected region from type_a.
+		 *
+		 *	r_start = idx_b ? r[-1].base + r[-1].size : 0;
+		 *	r_end = idx_b < type_b->cnt ? r->base : PHYS_ADDR_MAX;
+		 *
+		 *
+		 *	 r[-1].base   					 r->base or PHYS_ADDR_MAX
+		 *		   \					/
+		 *	+-----------+------------+---------------------+------------+
+		 *      |	    |  reserved  |     not covered     |  reserved  |
+ 		 *	+-----------+------------+---------------------+------------+
+		 *				/			\
+		 *			 r_start			 r_end
+ 		 *
+		 *	I suppose a real-world scenario would look like the following:
+		 *
+		 *	m_start								      m_end
+		 *	       \   							     /
+		 *		+--------------------+---------+-------+-----------+--------+
+		 *		|		     |reserved1|       | reserved0 |	    |
+		 *		+--------------------+---------+-------+-----------+--------+
+		 *	       /  		    /         /       /           /        /
+		 *     r_start2		     r_end2   r_start1  r_end1    r_start0   r_end0
+		 */
+
+		Basically we find these continuous regions that are within m_start and m_end but aren't reserved,
+		then we return it.
+
+		when choosing a region, we use max(m_start, r_start) for out_start and min(m_end, r_end) for
+		out_end.
+
+
+	__memblock_find_range_bottom_up:
+
+		-__memblock_find_range_bottom_up - find free area utility in bottom-up
+		-@start: start of candidate range
+		-@end: end of candidate range, can be %MEMBLOCK_ALLOC_ANYWHERE or
+		-      %MEMBLOCK_ALLOC_ACCESSIBLE
+		-@size: size of free area to find
+		-@align: alignment of free area to find
+		-@nid: nid of the free area to find, %NUMA_NO_NODE for any node
+		-@flags: pick from blocks based on memory attributes
+		-
+		-Utility called from memblock_find_in_range_node(), find free area bottom-up.
+		-
+		-Return:
+		-Found address on success, 0 on failure.
+
+		/*	static phys_addr_t __init_memblock
+		 *	__memblock_find_range_bottom_up(phys_addr_t start, phys_addr_t end,
+		 *					phys_addr_t size, phys_addr_t align, int nid,
+		 *					enum memblock_flags flags)
+		 *	{
+		 *		phys_addr_t this_start, this_end, cand;
+		 *		u64 i;
+		 *
+		 *		for_each_free_mem_range(i, nid, flags, &this_start, &this_end, NULL) {
+		 *			this_start = clamp(this_start, start, end);
+		 *			this_end = clamp(this_end, start, end);
+		 *
+		 *			cand = round_up(this_start, align);
+		 *			if (cand < this_end && this_end - cand >= size)
+		 *				return cand;
+		 *		}
+		 *
+		 *		return 0;
+		 *	}
+		 */
+
+		/* for_each_free_mem_range:
+		 *
+		 *	#define for_each_free_mem_range(i, nid, flags, p_start, p_end, p_nid)	\
+		 *		__for_each_mem_range(i, &memblock.memory, &memblock.reserved,	\
+		 *				     nid, flags, p_start, p_end, p_nid)
+		 */
+
+	 	/* __for_each_mem_range:
+		 *
+		 *	#define __for_each_mem_range(i, type_a, type_b, nid, flags,		\
+		 *				   p_start, p_end, p_nid)			\
+		 *		for (i = 0, __next_mem_range(&i, nid, flags, type_a, type_b,	\
+		 *					     p_start, p_end, p_nid);		\
+		 *		     i != (u64)ULLONG_MAX;					\
+		 *		     __next_mem_range(&i, nid, flags, type_a, type_b,		\
+		 *				      p_start, p_end, p_nid))
+		 */
+
+	__next_mem_range:
+
+
+		-__next_mem_range - next function for for_each_free_mem_range() etc.
+		-@idx: pointer to u64 loop variable
+		-@nid: node selector, %NUMA_NO_NODE for all nodes
+		-@flags: pick from blocks based on memory attributes
+		-@type_a: pointer to memblock_type from where the range is taken
+		-@type_b: pointer to memblock_type which excludes memory from being taken
+		-@out_start: ptr to phys_addr_t for start address of the range, can be %NULL
+		-@out_end: ptr to phys_addr_t for end address of the range, can be %NULL
+		-@out_nid: ptr to int for nid of the range, can be %NULL
+		-
+		-Find the first area from *@idx which matches @nid, fill the out
+		-parameters, and update *@idx for the next iteration.  The lower 32bit of
+		-*@idx contains index into type_a and the upper 32bit indexes the
+		-areas before each region in type_b.	For example, if type_b regions
+		-look like the following,
+		-
+		-	0:[0-16), 1:[32-48), 2:[128-130)
+		-
+		-The upper 32bit indexes the following regions.
+		-
+		-	0:[0-0), 1:[16-32), 2:[48-128), 3:[130-MAX)
+		-
+		-As both region arrays are sorted, the function advances the two indices
+		-in lockstep and returns each intersection.
+
+		/*	void __next_mem_range(u64 *idx, int nid, enum memblock_flags flags,
+		 *			      struct memblock_type *type_a,
+		 *			      struct memblock_type *type_b, phys_addr_t *out_start,
+		 *			      phys_addr_t *out_end, int *out_nid)
+		 *	{
+		 *		int idx_a = *idx & 0xffffffff;
+		 *		int idx_b = *idx >> 32;
+		 *
+		 *		for (; idx_a < type_a->cnt; idx_a++) {
+		 *			struct memblock_region *m = &type_a->regions[idx_a];
+		 *
+		 *			phys_addr_t m_start = m->base;
+		 *			phys_addr_t m_end = m->base + m->size;
+		 *			int	    m_nid = memblock_get_region_node(m);
+		 *
+		 *			if (should_skip_region(type_a, m, nid, flags))
+		 *				continue;
+		 *
+		 *			if (!type_b) {
+		 *				if (out_start)
+		 *					*out_start = m_start;
+		 *				if (out_end)
+		 *					*out_end = m_end;
+		 *				if (out_nid)
+		 *					*out_nid = m_nid;
+		 *				idx_a++;
+		 *				*idx = (u32)idx_a | (u64)idx_b << 32;
+		 *				return;
+		 *			}
+		 *
+		 *			/* scan areas before each reservation */
+		 *			for (; idx_b < type_b->cnt + 1; idx_b++) {
+		 *				struct memblock_region *r;
+		 *				phys_addr_t r_start;
+		 *				phys_addr_t r_end;
+		 *
+		 *				r = &type_b->regions[idx_b];
+		 *				r_start = idx_b ? r[-1].base + r[-1].size : 0;
+		 *				r_end = idx_b < type_b->cnt ?
+		 *					r->base : PHYS_ADDR_MAX;
+		 *
+		 *				/*
+		 *				 * if idx_b advanced past idx_a,
+		 *				 * break out to advance idx_a
+		 *				 */
+		 *				if (r_start >= m_end)
+		 *					break;
+		 *				/* if the two regions intersect, we're done */
+		 *				if (m_start < r_end) {
+		 *					if (out_start)
+		 *						*out_start =
+		 *							max(m_start, r_start);
+		 *					if (out_end)
+		 *						*out_end = min(m_end, r_end);
+		 *					if (out_nid)
+		 *						*out_nid = m_nid;
+		 *					/*
+		 *					 * The region which ends first is
+		 *					 * advanced for the next iteration.
+		 *					 */
+		 *					if (m_end <= r_end)
+		 *						idx_a++;
+		 *					else
+		 *						idx_b++;
+		 *					*idx = (u32)idx_a | (u64)idx_b << 32;
+		 *					return;
+		 *				}
+		 *			}
+		 *		}
+		 *
+		 *		/* signal end of iteration */
+		 *		*idx = ULLONG_MAX;
+		 *	}
+		 */
+
+	should_skip_region:
+
+		/*	static bool should_skip_region(struct memblock_type *type,
+		 *				       struct memblock_region *m,
+		 *				       int nid, int flags)
+		 *	{
+		 *		int m_nid = memblock_get_region_node(m);
+		 *
+		 *		/* we never skip regions when iterating memblock.reserved or physmem */
+		 *		if (type != memblock_memory)
+		 *			return false;
+		 *
+		 *		/* only memory regions are associated with nodes, check it */
+		1*		if (numa_valid_node(nid) && nid != m_nid)
+		 *			return true;
+		 *
+		 *		/* skip hotpluggable memory regions if needed */
+		 *		if (movable_node_is_enabled() && memblock_is_hotpluggable(m) &&
+		 *		    !(flags & MEMBLOCK_HOTPLUG))
+		 *			return true;
+		 *
+		 *		/* if we want mirror memory skip non-mirror memory regions */
+		 *		if ((flags & MEMBLOCK_MIRROR) && !memblock_is_mirror(m))
+		 *			return true;
+		 *
+		 *		/* skip nomap memory unless we were asked for it explicitly */
+		 *		if (!(flags & MEMBLOCK_NOMAP) && memblock_is_nomap(m))
+		 *			return true;
+		 *
+		 *		/* skip driver-managed memory unless we were asked for it explicitly */
+		 *		if (!(flags & MEMBLOCK_DRIVER_MANAGED) && memblock_is_driver_managed(m))
+		 *			return true;
+		 *
+		 *		return false;
+		 *	}
+		 */
+
+		1* NUMA_NO_NODE evaluates to -1, so no region will be skipped because of incompatible nid.
+
+  2.3.3 Freeing API
+  2.3.4 Freeing internal
+ 2.4 Memblock destruction

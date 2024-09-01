@@ -1,0 +1,42 @@
+1. Initialization
+
+ fuctions to study(in call order):
+
+	start_kernel -+--> setup_arch
+	 	      |
+		      +--> mm_core_init
+
+	setup_arch -+-> memblock_set_current_limit
+		    |
+		    +-> e820__memblock_setup
+		    |
+		    +-> initmem_init
+		    |
+	   	    +-> x86_init.paging.pagetable_init -> native_pagetable_init -> paging_init -+-> sparse_init
+	  			   							        |
+	 											+-> zone_sizes_init -> free_area_init
+
+	mm_core_init -+-> mem_init
+
+2. Memblock
+
+ memblock_add --------+-----> memblock_add_range
+ memblock_add_node ---|
+ memblock_reserve ----+
+
+ API call graphs:
+
+	memblock_alloc_raw ---------> memblock_alloc_try_nid_raw +
+	memblock_alloc ---------+				 |
+	memblock_alloc_from ----|				 |
+	memblock_alloc_low -----|				 |
+	memblock_alloc_node ----+---> memblock_alloc_try_nid ----+--> memblock_alloc_internal --+--> memblock_alloc_range_nid -->#
+												|
+	memblock_phys_alloc_range ---+----------------------------------------------------------+
+	memblock_phys_alloc_try_nid -+
+
+
+   #--> memblock_alloc_range_nid --> memblock_find_in_range_node --+--> __memblock_find_range_bottom_up
+								   |
+								   +--> __memblock_find_range_top_down
+
