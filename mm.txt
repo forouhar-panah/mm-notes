@@ -1,7 +1,9 @@
 0. Prologue
-1. Initialization
+1. Initialization road
 2. Memblock
-
+3. NUMA init (possibly?)
+4. Sparse (possibly?)
+5. Page allocator (possibly?)
 
 0. Prologue
 
@@ -15,7 +17,7 @@
 	multi-line comments(within /* ... */) while comments and documentations from source code are preceded by hyphens(-).
 	I decided to use hyphens to distinguish my own notes from linux's comments.
 
-1. Initialization
+1. Initialization road
 
 	/* fuctions to study(in call order):
 	 *
@@ -23,7 +25,9 @@
 	 * 		 |
 	 *		 +--> mm_core_init
          *
-	 * setup_arch -+-> memblock_set_current_limit
+	 * setup_arch -+-> setup_initial_init_mm ?
+	 *	       |
+	 *	       +-> memblock_set_current_limit
 	 *	       |
 	 *	       +-> e820__memblock_setup
 	 *	       |
@@ -33,7 +37,9 @@
 	 *  			   							           |
 	 * 											   +-> zone_sizes_init -> free_area_init
 	 *
-	 * mm_core_init -+-> mem_init
+	 * mm_core_init -+-> build_all_zonelists
+	 *		 |
+	 *		 +-> mem_init
 	 */
 
  1.1 e820__memblock_setup & memblock_set_current_limit:
@@ -51,9 +57,7 @@
 
  1.2 initmem_init:
 
-	if CONFIG_NUMA is enabled, it calls x86_numa_init.
-
-  1.2.1 x86_numa_init:
+	If CONFIG_NUMA is enabled, it calls x86_numa_init. This function receives
 
 
 
@@ -329,8 +333,8 @@
 		 * Regarding the worst case scenario:
 		 *	worst case would be a new area encompassing all existing regions like the following:
 		 *
-		 *	          new region
-		 *	      <---------------->
+		 *	       new region
+		 *	      <---------------------------------------------------------------------------------------->
 		 *	       (base)            									  (end)
 		 *	      /	         	 								         /
 		 *	     |___________|_______|___________|_______|__________ ....... __________|_______|____________|
@@ -1445,5 +1449,209 @@
 		1* NUMA_NO_NODE evaluates to -1, so no region will be skipped because of incompatible nid.
 
   2.3.3 Freeing API
+
+	memblock_free:
+
+
+		-memblock_free - free boot memory allocation
+		-@ptr: starting address of the  boot memory allocation
+		-@size: size of the boot memory block in bytes
+		-
+		-Free boot memory block previously allocated by memblock_alloc_xx() API.
+		-The freeing memory will not be released to the buddy allocator.
+
+
+		/*	void __init_memblock memblock_free(void *ptr, size_t size)
+		 *	{
+		 *		if (ptr)
+		 *			memblock_phys_free(__pa(ptr), size);
+		 *	}
+		 */
+
+	memblock_phys_free:
+
+		-memblock_phys_free - free boot memory block
+		-@base: phys starting address of the  boot memory block
+		-@size: size of the boot memory block in bytes
+		-
+		-Free boot memory block previously allocated by memblock_phys_alloc_xx() API.
+		-The freeing memory will not be released to the buddy allocator.
+
+		/*	int __init_memblock memblock_phys_free(phys_addr_t base, phys_addr_t size)
+		 *	{
+		 *		phys_addr_t end = base + size - 1;
+		 *
+		 *		memblock_dbg("%s: [%pa-%pa] %pS\n", __func__,
+		 *			     &base, &end, (void *)_RET_IP_);
+		 *
+		 *		kmemleak_free_part_phys(base, size);
+		 *		return memblock_remove_range(&memblock.reserved, base, size);
+		 *	}
+		 */
+
   2.3.4 Freeing internal
+
+	In order to successfully free a memory block, all we need to do is remove the relevant
+	entries in &memblock.reserved.
+
+	memblock_remove_range:
+
+		/*	static int __init_memblock memblock_remove_range(struct memblock_type *type,
+		 *						  phys_addr_t base, phys_addr_t size)
+		 *	{
+		 *		int start_rgn, end_rgn;
+		 *		int i, ret;
+		 *
+		 *		ret = memblock_isolate_range(type, base, size, &start_rgn, &end_rgn);
+		 *		if (ret)
+		 *			return ret;
+		 *
+		 *		for (i = end_rgn - 1; i >= start_rgn; i--)
+		 *			memblock_remove_region(type, i);
+		 *		return 0;
+		 *	}
+		 */
+
+	memblock_isolate_range:
+
+		- memblock_isolate_range - isolate given range into disjoint memblocks
+		- @type: memblock type to isolate range for
+		- @base: base of range to isolate
+		- @size: size of range to isolate
+		- @start_rgn: out parameter for the start of isolated region
+		- @end_rgn: out parameter for the end of isolated region
+		-
+		- Walk @type and ensure that regions don't cross the boundaries defined by
+		- [@base, @base + @size).  Crossing regions are split at the boundaries,
+		- which may create at most two more regions.  The index of the first
+		- region inside the range is returned in *@start_rgn and the index of the
+		- first region after the range is returned in *@end_rgn.
+		-
+		- Return:
+		- 0 on success, -errno on failure.
+
+		/*	static int __init_memblock memblock_isolate_range(struct memblock_type *type,
+		 *						phys_addr_t base, phys_addr_t size,
+		 *						int *start_rgn, int *end_rgn)
+		 *	{
+		 *		phys_addr_t end = base + memblock_cap_size(base, &size);
+		 *		int idx;
+		 *		struct memblock_region *rgn;
+		 *
+		 *		*start_rgn = *end_rgn = 0;
+		 *
+		 *		if (!size)
+		 *			return 0;
+		 *
+		 *		/* we'll create at most two more regions */
+		1*		while (type->cnt + 2 > type->max)
+		 *			if (memblock_double_array(type, base, size) < 0)
+		 *				return -ENOMEM;
+		 *
+		 *		for_each_memblock_type(idx, type, rgn) {
+		 *			phys_addr_t rbase = rgn->base;
+		 *			phys_addr_t rend = rbase + rgn->size;
+		 *
+		 *			if (rbase >= end)
+		 *				break;
+		 *			if (rend <= base)
+		 *				continue;
+		 *
+		2*			if (rbase < base) {
+		 *				/*
+		 *				 * @rgn intersects from below.  Split and continue
+		 *				 * to process the next region - the new top half.
+		 *				 */
+		 *				rgn->base = base;
+		 *				rgn->size -= base - rbase;
+		 *				type->total_size -= base - rbase;
+		 *				memblock_insert_region(type, idx, rbase, base - rbase,
+		 *						       memblock_get_region_node(rgn),
+		 *						       rgn->flags);
+		3*			} else if (rend > end) {
+		 *				/*
+		 *				 * @rgn intersects from above.  Split and redo the
+		 *				 * current region - the new bottom half.
+		 *				 */
+		 *				rgn->base = end;
+		 *				rgn->size -= end - rbase;
+		 *				type->total_size -= end - rbase;
+		 *				memblock_insert_region(type, idx--, rbase, end - rbase,
+		 *						       memblock_get_region_node(rgn),
+		 *						       rgn->flags);
+		4*			} else {
+		 *				/* @rgn is fully contained, record it */
+		 *				if (!*end_rgn)
+		 *					*start_rgn = idx;
+		 *				*end_rgn = idx + 1;
+		 *			}
+		 *		}
+		 *
+		 *		return 0;
+		 *	}
+		 */
+
+		1* we must have at least 2 free entries in the regions array, because the region that we want to free
+		   could be contained within a bigger region, so we need to include the regions before and after our region
+		   as separate regions into the array. like the following:
+
+		/*		  base	     end
+		 * 	              \     	\
+		 *	+--------------+---------+--------+----+
+		 *	|     | insert | to free | insert |    |
+		 *	+-----+--------+---------+--------+----+
+		 *           /				 /
+		 *      rbase			    rend
+		 */
+
+		2* @rng start before our region. we need to remove it and insert it as its own region.
+
+		/*	rbase	  base
+		 * 	     \        \
+		 *	+-----+--------+-----------
+		 *	|     | insert | to free
+		 *	+-----+--------+-----------
+		 */
+
+		3* @rng extends beyond our region. we need to separate the end part and insert it and
+		   repeat the loop at the current region(this is why we decrement idx).
+
+		/*		    end	     rend
+		 * 		       \	 \
+		 *	----------------+---------+
+		 *	        to free |  insert |
+		 *	----------------+---------+
+		 */
+
+		 4* The region to isolate might consists of multiple regions. this is why we set @start_rgn
+		    to the index of the first region containing our target and @end_rgn to the index after
+		    the last intersected region (in other words, the fisrt index after our region).
+
+
+	memblock_remove_region:
+
+		/*	static void __init_memblock memblock_remove_region(struct memblock_type *type, unsigned long r)
+		 *	{
+		 *		type->total_size -= type->regions[r].size;
+		 *		memmove(&type->regions[r], &type->regions[r + 1],
+		 *			(type->cnt - (r + 1)) * sizeof(type->regions[r]));
+		 *		type->cnt--;
+		 *
+		 *		/* Special case for empty arrays */
+		 *		if (type->cnt == 0) {
+		 *			WARN_ON(type->total_size != 0);
+		 *			type->regions[0].base = 0;
+		 *			type->regions[0].size = 0;
+		 *			type->regions[0].flags = 0;
+		 *			memblock_set_region_node(&type->regions[0], MAX_NUMNODES);
+		 *		}
+		 *	}
+		 */
+
+		we finally remove the selected regions from &memblock.reserved
+
+
  2.4 Memblock destruction
+	memblock_free_all
+	memblock_discard
+	memblock_discard will take care of excess memory resulted from alignment requirements.
