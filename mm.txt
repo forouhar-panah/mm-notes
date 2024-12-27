@@ -2,14 +2,14 @@
 1. Initialization road
 2. Memblock
 3. NUMA init (possibly?)
-4. Sparse (possibly?)
+4. Sparsemem (possibly?)
 5. Page allocator (possibly?)
 
 0. Prologue
 
 	These are the notes that I took while studing the Memory Management subsystem of Linux. When it comes to arch-specific details I only
 	consider x86_64(sometimes I do mention certain 32-bit specific details). when I study a certain part of Linux, I will always choose
-	the latest stable version. I will state the version of Linux when I'm taking these notes.
+	the latest stable version.
 
  0.1. Note style
 
@@ -31,7 +31,9 @@
 	 *	       |
 	 *	       +-> e820__memblock_setup
 	 *	       |
-	 *	       +-> initmem_init
+	 *	       +-> init_mem_mapping ?
+	 *	       |
+	 *	       +-> initmem_init -> x86_numa_init -> numa_init
 	 *	       |
 	 *   	       +-> x86_init.paging.pagetable_init -> native_pagetable_init -> paging_init -+-> sparse_init
 	 *  			   							           |
@@ -58,8 +60,6 @@
  1.2 initmem_init:
 
 	If CONFIG_NUMA is enabled, it calls x86_numa_init. This function receives
-
-
 
 
 2. Memblock:
@@ -1655,3 +1655,433 @@
 	memblock_free_all
 	memblock_discard
 	memblock_discard will take care of excess memory resulted from alignment requirements.
+
+ 2.5 MISC
+  2.5.1 NUMA info
+	memblock_set_node:
+
+	- memblock_set_node - set node ID on memblock regions
+	- @base: base of area to set node ID for
+	- @size: size of area to set node ID for
+	- @type: memblock type to set node ID for
+	- @nid: node ID to set
+	-
+	- Set the nid of memblock @type regions in [@base, @base + @size) to @nid.
+	- Regions which cross the area boundaries are split as necessary.
+	-
+	- Return:
+	- 0 on success, -errno on failure.
+
+	/*	int __init_memblock memblock_set_node(phys_addr_t base, phys_addr_t size,
+	 *					      struct memblock_type *type, int nid)
+	 *	{
+	 *	#ifdef CONFIG_NUMA
+	 *		int start_rgn, end_rgn;
+	 *		int i, ret;
+	 *
+	 *		ret = memblock_isolate_range(type, base, size, &start_rgn, &end_rgn);
+	 *		if (ret)
+	 *			return ret;
+	 *
+	 *		for (i = start_rgn; i < end_rgn; i++)
+	 *			memblock_set_region_node(&type->regions[i], nid);
+	 *
+	 *		memblock_merge_regions(type, start_rgn, end_rgn);
+	 *	#endif
+	 *		return 0;
+	 *	}
+	 */
+
+
+
+3. NUMA initialization
+
+ 3.1 Data structures:
+
+	/* include/linux/numa_memblks.h:
+	 *
+	 *	struct numa_memblk {
+	 *		u64			start;
+	 *		u64			end;
+	 *		int			nid;
+	 *	};
+	 *
+	 *	struct numa_meminfo {
+	 *		int			nr_blks;
+	 *		struct numa_memblk	blk[NR_NODE_MEMBLKS];
+	 *	};
+	 */
+
+	NR_NODE_MEMBLKS is MAX_NUMNODES * 2.
+
+	/* mm/numa_memblks.c:
+	 *
+	 *	static int numa_distance_cnt;
+	 *	static u8 *numa_distance;
+	 *
+	 *	nodemask_t numa_nodes_parsed __initdata;
+	 *
+	 *	static struct numa_meminfo numa_meminfo __initdata_or_meminfo;
+	 *	static struct numa_meminfo numa_reserved_meminfo __initdata_or_meminfo;
+	 */
+
+
+ 3.2 x86_numa_init:
+
+	- x86_numa_init - Initialize NUMA
+	-
+	- Try each configured NUMA initialization method until one succeeds.  The
+	- last fallback is dummy single node config encompassing whole memory and
+	- never fails.
+
+	/*	void __init x86_numa_init(void)
+	 *	{
+	 *		if (!numa_off) {
+	 *	#ifdef CONFIG_ACPI_NUMA
+	 *			if (!numa_init(x86_acpi_numa_init))
+	 *				return;
+	 *	#endif
+	 *	#ifdef CONFIG_AMD_NUMA
+	 *			if (!numa_init(amd_numa_init))
+	 *				return;
+	 *	#endif
+	 *			if (acpi_disabled && !numa_init(of_numa_init))
+	 *				return;
+	 *		}
+	 *
+	 *		numa_init(dummy_numa_init);
+	 *	}
+	 */
+
+	For now I only focus on dummy_numa_init case(keeping things simple for now).
+
+ 3.3 dummy_numa_init:
+
+	- dummy_numa_init - Fallback dummy NUMA init
+	-
+	- Used if there's no underlying NUMA architecture, NUMA initialization
+	- fails, or NUMA is disabled on the command line.
+	-
+	- Must online at least one node and add memory blocks that cover all
+	- allowed memory.  This function must not fail.
+
+	/*	static int __init dummy_numa_init(void)
+	 *	{
+	 *		printk(KERN_INFO "%s\n",
+	 *		       numa_off ? "NUMA turned off" : "No NUMA configuration found");
+	 *		printk(KERN_INFO "Faking a node at [mem %#018Lx-%#018Lx]\n",
+	 *		       0LLU, PFN_PHYS(max_pfn) - 1);
+	 *
+	 *		node_set(0, numa_nodes_parsed);
+	 *		numa_add_memblk(0, 0, PFN_PHYS(max_pfn));
+	 *
+	 *		return 0;
+	 *	}
+	 */
+
+ 3.4 numa_init:
+
+	/*	static int __init numa_init(int (*init_func)(void))
+	 *	{
+	 *		int i;
+	 *		int ret;
+	 *
+	 *		for (i = 0; i < MAX_LOCAL_APIC; i++)
+	 *			set_apicid_to_node(i, NUMA_NO_NODE);
+	 *
+	 *		ret = numa_memblks_init(init_func, /* memblock_force_top_down */ true);
+	 *		if (ret < 0)
+	 *			return ret;
+	 *
+	 *		ret = numa_register_nodes();
+	 *		if (ret < 0)
+	 *			return ret;
+	 *
+	 *		for (i = 0; i < nr_cpu_ids; i++) {
+	 *			int nid = early_cpu_to_node(i);
+	 *
+	 *			if (nid == NUMA_NO_NODE)
+	 *				continue;
+	 *			if (!node_online(nid))
+	 *				numa_clear_node(i);
+	 *		}
+	 *		numa_init_array();
+	 *
+	 *		return 0;
+	 *	}
+	 */
+
+
+
+ 3.5 numa_memblks_init:
+
+	/*	int __init numa_memblks_init(int (*init_func)(void),
+	 *				     bool memblock_force_top_down)
+	 *	{
+	 *		phys_addr_t max_addr = (phys_addr_t)ULLONG_MAX;
+	 *		int ret;
+	 *
+	 *		nodes_clear(numa_nodes_parsed);
+	 *		nodes_clear(node_possible_map);
+	 *		nodes_clear(node_online_map);
+	 *		memset(&numa_meminfo, 0, sizeof(numa_meminfo));
+	 *		WARN_ON(memblock_set_node(0, max_addr, &memblock.memory, NUMA_NO_NODE));
+	 *		WARN_ON(memblock_set_node(0, max_addr, &memblock.reserved,
+	 *					  NUMA_NO_NODE));
+	 *		/* In case that parsing SRAT failed. */
+	 *		WARN_ON(memblock_clear_hotplug(0, max_addr));
+	 *		numa_reset_distance();
+	 *
+	 *		ret = init_func();
+	 *		if (ret < 0)
+	 *			return ret;
+	 *
+	 *		/*
+	 *		 * We reset memblock back to the top-down direction
+	 *		 * here because if we configured ACPI_NUMA, we have
+	 *		 * parsed SRAT in init_func(). It is ok to have the
+	 *		 * reset here even if we did't configure ACPI_NUMA
+	 *		 * or acpi numa init fails and fallbacks to dummy
+	 *		 * numa init.
+	 *		 */
+	 *		if (memblock_force_top_down)
+	 *			memblock_set_bottom_up(false);
+	 *
+	 *		ret = numa_cleanup_meminfo(&numa_meminfo);
+	 *		if (ret < 0)
+	 *			return ret;
+	 *
+	 *		numa_emulation(&numa_meminfo, numa_distance_cnt);
+	 *
+	 *		return numa_register_meminfo(&numa_meminfo);
+	 *	}
+	 */
+
+	we set numa_nodes_parsed, node_possible_map, node_online_map to zero for all MAX_NUMNODES nodes.
+	we zero-out numa_meminfo. we set all NUMA ids of all memblocks regions(both memblock.memory and
+	memblock.reserved) to NUMA_NO_NODE.
+	memblock_clear_hotplug clears the MEMBLOCK_HOTPLUG flag on every region.
+	numa_reset_distance deallocates memory pointed to by numa_distance and sets numa_distance_cnt to 0.
+	after all this, we call init_func, which parses NUMA info. if for whatever reason, this fails, we
+	call dummy_numa_init which just allocates one node and dedicates all allowed memory to it.
+
+	numa_cleanup_meminfo gets called to merge compatible regions and also exclude regions that are
+	not within memblock.memory(in other words, reserved memory) and include them in numa_reserved_meminfo.
+
+	for now, I don't study numa_emulation and come back to it at later time.
+
+  3.5.1 numa_reset_distance:
+
+	- numa_reset_distance - Reset NUMA distance table
+	-
+	- The current table is freed.  The next numa_set_distance() call will
+	- create a new one.
+
+	/*	void __init numa_reset_distance(void)
+	 *	{
+	 *		size_t size = numa_distance_cnt * numa_distance_cnt * sizeof(numa_distance[0]);
+	 *
+	 *		/* numa_distance could be 1LU marking allocation failure, test cnt */
+	 *		if (numa_distance_cnt)
+	 *			memblock_free(numa_distance, size);
+	 *		numa_distance_cnt = 0;
+	 *		numa_distance = NULL;	/* enable table creation */
+	 *	}
+	 */
+
+  3.5.2 numa_cleanup_meminfo:
+
+	- numa_cleanup_meminfo - Cleanup a numa_meminfo
+	- @mi: numa_meminfo to clean up
+	-
+	- Sanitize @mi by merging and removing unnecessary memblks.  Also check for
+	- conflicts and clear unused memblks.
+	-
+	- RETURNS:
+	- 0 on success, -errno on failure.
+
+	/*	int __init numa_cleanup_meminfo(struct numa_meminfo *mi)
+	 *	{
+	 *		const u64 low = memblock_start_of_DRAM();
+	 *		const u64 high = memblock_end_of_DRAM();
+	 *		int i, j, k;
+	 *
+	 *		/* first, trim all entries */
+	 *		for (i = 0; i < mi->nr_blks; i++) {
+	 *			struct numa_memblk *bi = &mi->blk[i];
+	 *
+	 *			/* move / save reserved memory ranges */
+	 *			if (!memblock_overlaps_region(&memblock.memory,
+	 *						bi->start, bi->end - bi->start)) {
+	 *				numa_move_tail_memblk(&numa_reserved_meminfo, i--, mi);
+	 *				continue;
+	 *			}
+	 *
+	 *			/* make sure all non-reserved blocks are inside the limits */
+	 *			bi->start = max(bi->start, low);
+	 *
+	 *			/* preserve info for non-RAM areas above 'max_pfn': */
+	 *			if (bi->end > high) {
+	 *				numa_add_memblk_to(bi->nid, high, bi->end,
+	 *						   &numa_reserved_meminfo);
+	 *				bi->end = high;
+	 *			}
+	 *
+	 *			/* and there's no empty block */
+	 *			if (bi->start >= bi->end)
+	 *				numa_remove_memblk_from(i--, mi);
+	 *		}
+	 *
+	 *		/* merge neighboring / overlapping entries */
+	 *		for (i = 0; i < mi->nr_blks; i++) {
+	 *			struct numa_memblk *bi = &mi->blk[i];
+	 *
+	 *			for (j = i + 1; j < mi->nr_blks; j++) {
+	 *				struct numa_memblk *bj = &mi->blk[j];
+	 *				u64 start, end;
+	 *
+	 *				/*
+	 *				 * See whether there are overlapping blocks.  Whine
+	 *				 * about but allow overlaps of the same nid.  They
+	 *				 * will be merged below.
+	 *				 */
+	 *				if (bi->end > bj->start && bi->start < bj->end) {
+	 *					if (bi->nid != bj->nid) {
+	 *						pr_err("node %d [mem %#010Lx-%#010Lx] overlaps with node %d [mem %#010Lx-%#010Lx]\n",
+	 *						       bi->nid, bi->start, bi->end - 1,
+	 *						       bj->nid, bj->start, bj->end - 1);
+	 *						return -EINVAL;
+	 *					}
+	 *					pr_warn("Warning: node %d [mem %#010Lx-%#010Lx] overlaps with itself [mem %#010Lx-%#010Lx]\n",
+	 *						bi->nid, bi->start, bi->end - 1,
+	 *						bj->start, bj->end - 1);
+	 *				}
+	 *
+	 *				/*
+	 *				 * Join together blocks on the same node, holes
+	 *				 * between which don't overlap with memory on other
+	 *				 * nodes.
+	 *				 */
+	 *				if (bi->nid != bj->nid)
+	 *					continue;
+	 *				start = min(bi->start, bj->start);
+	 *				end = max(bi->end, bj->end);
+	 *				for (k = 0; k < mi->nr_blks; k++) {
+	 *					struct numa_memblk *bk = &mi->blk[k];
+	 *
+	 *					if (bi->nid == bk->nid)
+	 *						continue;
+	 *					if (start < bk->end && end > bk->start)
+	 *						break;
+	 *				}
+	 *				if (k < mi->nr_blks)
+	 *					continue;
+	 *				pr_info("NUMA: Node %d [mem %#010Lx-%#010Lx] + [mem %#010Lx-%#010Lx] -> [mem %#010Lx-%#010Lx]\n",
+	 *				       bi->nid, bi->start, bi->end - 1, bj->start,
+	 *				       bj->end - 1, start, end - 1);
+	 *				bi->start = start;
+	 *				bi->end = end;
+	 *				numa_remove_memblk_from(j--, mi);
+	 *			}
+	 *		}
+	 *
+	 *		/* clear unused ones */
+	 *		for (i = mi->nr_blks; i < ARRAY_SIZE(mi->blk); i++) {
+	 *			mi->blk[i].start = mi->blk[i].end = 0;
+	 *			mi->blk[i].nid = NUMA_NO_NODE;
+	 *		}
+	 *
+	 *		return 0;
+	 *	}
+	 */
+
+  3.5.3 numa_register_meminfo:
+
+	/*	static int __init numa_register_meminfo(struct numa_meminfo *mi)
+	 *	{
+	 *		int i;
+	 *
+	 *		/* Account for nodes with cpus and no memory */
+	 *		node_possible_map = numa_nodes_parsed;
+	 *		numa_nodemask_from_meminfo(&node_possible_map, mi);
+	 *		if (WARN_ON(nodes_empty(node_possible_map)))
+	 *			return -EINVAL;
+	 *
+	 *		for (i = 0; i < mi->nr_blks; i++) {
+	 *			struct numa_memblk *mb = &mi->blk[i];
+	 *
+	 *			memblock_set_node(mb->start, mb->end - mb->start,
+	 *					  &memblock.memory, mb->nid);
+	 *		}
+	 *
+	 *		/*
+	 *		 * At very early time, the kernel have to use some memory such as
+	 *		 * loading the kernel image. We cannot prevent this anyway. So any
+	 *		 * node the kernel resides in should be un-hotpluggable.
+	 *		 *
+	 *		 * And when we come here, alloc node data won't fail.
+	 *		 */
+	 *		numa_clear_kernel_node_hotplug();
+	 *
+	 *		/*
+	 *		 * If sections array is gonna be used for pfn -> nid mapping, check
+	 *		 * whether its granularity is fine enough.
+	 *		 */
+	 *		if (IS_ENABLED(NODE_NOT_IN_PAGE_FLAGS)) {
+	 *			unsigned long pfn_align = node_map_pfn_alignment();
+	 *
+	 *			if (pfn_align && pfn_align < PAGES_PER_SECTION) {
+	 *				unsigned long node_align_mb = PFN_PHYS(pfn_align) >> 20;
+	 *
+	 *				unsigned long sect_align_mb = PFN_PHYS(PAGES_PER_SECTION) >> 20;
+	 *
+	 *				pr_warn("Node alignment %luMB < min %luMB, rejecting NUMA config\n",
+	 *					node_align_mb, sect_align_mb);
+	 *				return -EINVAL;
+	 *			}
+	 *		}
+	 *
+	 *		return 0;
+	 *	}
+	 */
+
+
+ 3.6 numa_register_nodes:
+ 3.7 alloc_node_data:
+
+
+4. Sparsemem
+
+ 4.0 Data structures
+
+	/*	struct mem_section {
+	 *		/*
+	 *		 * This is, logically, a pointer to an array of struct
+	 *		 * pages.  However, it is stored with some other magic.
+	 *		 * (see sparse.c::sparse_init_one_section())
+	 *		 *
+	 *		 * Additionally during early boot we encode node id of
+	 *		 * the location of the section here to guide allocation.
+	 *		 * (see sparse.c::memory_present())
+	 *		 *
+	 *		 * Making it a UL at least makes someone do a cast
+	 *		 * before using it wrong.
+	 *		 */
+	 *		unsigned long section_mem_map;
+	 *
+	 *		struct mem_section_usage *usage;
+	 *	#ifdef CONFIG_PAGE_EXTENSION
+	 *		/*
+	 *		 * If SPARSEMEM, pgdat doesn't have page_ext pointer. We use
+	 *		 * section. (see page_ext.h about this.)
+	 *		 */
+	 *		struct page_ext *page_ext;
+	 *		unsigned long pad;
+	 *	#endif
+	 *		/*
+	 *		 * WARNING: mem_section must be a power-of-2 in size for the
+	 *		 * calculation and use of SECTION_ROOT_MASK to make sense.
+	 *		 */
+	 *	};
+	 */
+

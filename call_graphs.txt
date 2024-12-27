@@ -20,9 +20,9 @@
 
 2. Memblock
 
- memblock_add --------+-----> memblock_add_range
- memblock_add_node ---|
- memblock_reserve ----+
+	memblock_add --------+-----> memblock_add_range
+	memblock_add_node ---|
+	memblock_reserve ----+
 
  API call graphs:
 
